@@ -6,6 +6,7 @@ rule Researcher_PHP_Webshell_Common
   strings:
     $eval_post = "eval($_POST"
     $eval_request = "eval($_REQUEST"
+    $system_any = "system("
     $system_get = "system($_GET"
     $system_post = "system($_POST"
     $shell_exec = "shell_exec("
