@@ -7,7 +7,7 @@ name = "researcher"
 dynamic = ["version"]
 description = "Readonly Linux server backup log scanner for DFIR triage"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["zstandard>=0.23"]
 
 [project.scripts]
 researcher-scan = "researcher.cli:main"

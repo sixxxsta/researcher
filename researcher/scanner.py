@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bz2
 import gzip
+import io
 import ipaddress
 import lzma
 import re
@@ -11,6 +12,10 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Iterable, Iterator
+
+import zstandard
+
+from .artifacts import ArtifactScan, scan_artifacts
 
 
 IP_RE = re.compile(
@@ -41,7 +46,7 @@ LOG_NAME_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-ROTATED_LOG_RE = re.compile(r"\.log(?:\.\d+)?(?:\.(?:gz|bz2|xz))?$", re.IGNORECASE)
+ROTATED_LOG_RE = re.compile(r"\.log(?:\.\d+)?(?:\.(?:gz|bz2|xz|zst))?$", re.IGNORECASE)
 SKIP_LOG_SUFFIXES = {".journal", ".idx", ".db", ".sqlite", ".sock"}
 
 SUSPICIOUS_PATH_PARTS = (
@@ -86,6 +91,7 @@ class Event:
     url: str = ""
     status: str = ""
     user: str = ""
+    referrer: str = ""
     user_agent: str = ""
     category: str = "other"
     raw: str = ""
@@ -104,6 +110,8 @@ class IpStats:
     statuses: Counter[str] = field(default_factory=Counter)
     users: Counter[str] = field(default_factory=Counter)
     urls: Counter[str] = field(default_factory=Counter)
+    user_agents: Counter[str] = field(default_factory=Counter)
+    referrers: Counter[str] = field(default_factory=Counter)
 
     @property
     def attack_score(self) -> int:
@@ -123,6 +131,7 @@ class ScanResult:
     skipped_files: list[str]
     events: list[Event]
     ip_stats: dict[str, IpStats]
+    artifacts: ArtifactScan
 
 
 def scan_backup(options: ScanOptions) -> ScanResult:
@@ -144,6 +153,8 @@ def scan_backup(options: ScanOptions) -> ScanResult:
         else:
             skipped_files.append("var/log/journal - journalctl not found")
 
+    artifacts = scan_artifacts(root)
+
     return ScanResult(
         root=root,
         files_scanned=len(scanned_files),
@@ -151,6 +162,7 @@ def scan_backup(options: ScanOptions) -> ScanResult:
         skipped_files=skipped_files,
         events=events,
         ip_stats=build_ip_stats(events),
+        artifacts=artifacts,
     )
 
 
@@ -168,9 +180,6 @@ def is_probable_log(path: Path, search_root: Path) -> bool:
     name = path.name.lower()
     if path.suffix.lower() in SKIP_LOG_SUFFIXES:
         return False
-    if path.suffix.lower() == ".zst":
-        # Python has no built-in zstd reader; list support can be added with zstandard later.
-        return False
     if ROTATED_LOG_RE.search(name):
         return True
     if LOG_NAME_RE.search(name):
@@ -179,7 +188,7 @@ def is_probable_log(path: Path, search_root: Path) -> bool:
         path.relative_to(search_root)
     except ValueError:
         return False
-    return name.endswith((".gz", ".bz2", ".xz")) or "." not in name
+    return name.endswith((".gz", ".bz2", ".xz", ".zst")) or "." not in name
 
 
 def scan_log_file(root: Path, path: Path, options: ScanOptions) -> Iterator[Event]:
@@ -286,6 +295,10 @@ def open_log_binary(path: Path) -> BinaryIO:
         return bz2.open(path, "rb")
     if suffix == ".xz":
         return lzma.open(path, "rb")
+    if suffix == ".zst":
+        handle = path.open("rb")
+        reader = zstandard.ZstdDecompressor().stream_reader(handle, closefd=True)
+        return io.BufferedReader(reader)  # type: ignore[arg-type]
     return path.open("rb")
 
 
@@ -397,6 +410,7 @@ def parse_web_line(
         method=method,
         url=url,
         status=match.group("status"),
+        referrer=match.group("referrer") or "",
         user_agent=match.group("user_agent") or "",
         category="web" if category == "other" else category,
         raw=line,
@@ -475,5 +489,9 @@ def build_ip_stats(events: Iterable[Event]) -> dict[str, IpStats]:
             item.users[event.user] += 1
         if event.url:
             item.urls[event.url] += 1
+        if event.user_agent:
+            item.user_agents[event.user_agent] += 1
+        if event.referrer:
+            item.referrers[event.referrer] += 1
 
     return dict(stats)
