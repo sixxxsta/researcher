@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=69", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "researcher"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Readonly Linux server backup log scanner for DFIR triage"
 requires-python = ">=3.10"
 dependencies = []
@@ -14,3 +14,7 @@ researcher-scan = "researcher.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
