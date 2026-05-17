@@ -160,8 +160,11 @@ def scan_yara(root: Path, scan: ArtifactScan, rule_inputs: list[Path], max_files
         root / "usr" / "local" / "bin",
         root / "opt",
     ]
+    scanned_files = 0
+    match_count = 0
     for base in targets:
         for path in limited_files(base, max_files):
+            scanned_files += 1
             for rules in compiled_rules:
                 try:
                     matches = rules.match(str(path), timeout=10)
@@ -179,6 +182,17 @@ def scan_yara(root: Path, scan: ArtifactScan, rule_inputs: list[Path], max_files
                         detail += f" strings={','.join(sorted(set(strings))[:10])}"
                     add_file_finding(scan, root, path, "yara_match", "yara", "high")
                     scan.findings[-1].detail = detail
+                    match_count += 1
+
+    add_finding(
+        scan,
+        "yara_scan_completed",
+        "yara",
+        root,
+        root,
+        "info",
+        detail=f"compiled_rule_sets={len(compiled_rules)} scanned_files={scanned_files} matches={match_count}",
+    )
 
 
 def discover_yara_rule_files(paths: list[Path]) -> list[Path]:
