@@ -27,7 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-private",
         action="store_true",
-        help="Include private/reserved/local IPs in attacker rankings.",
+        default=True,
+        help="Include private/reserved/local IPs in attacker rankings. This is the default.",
+    )
+    parser.add_argument(
+        "--public-only",
+        action="store_false",
+        dest="include_private",
+        help="Only include globally routable public IPs.",
     )
     parser.add_argument(
         "--max-line-bytes",
@@ -41,15 +48,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    root = args.root.expanduser()
+    out = args.out.expanduser()
+
+    if not root.exists():
+        parser.error(f"--root does not exist: {root}")
+    if not root.is_dir():
+        parser.error(f"--root is not a directory: {root}")
 
     options = ScanOptions(
-        root=args.root,
+        root=root,
         include_private=args.include_private,
         max_line_bytes=args.max_line_bytes,
     )
     result = scan_backup(options)
-    write_reports(result, args.out)
+    write_reports(result, out)
 
     print(f"Scanned {result.files_scanned} log files, found {len(result.ip_stats)} IPs.")
-    print(f"Reports written to: {args.out}")
+    if result.files_scanned == 0:
+        print("No log files were discovered. Check that --root points to the mounted Linux filesystem root.")
+    print(f"Reports written to: {out}")
     return 0

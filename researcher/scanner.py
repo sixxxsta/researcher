@@ -5,6 +5,8 @@ import gzip
 import ipaddress
 import lzma
 import re
+import shutil
+import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +42,7 @@ LOG_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 ROTATED_LOG_RE = re.compile(r"\.log(?:\.\d+)?(?:\.(?:gz|bz2|xz))?$", re.IGNORECASE)
+SKIP_LOG_SUFFIXES = {".journal", ".idx", ".db", ".sqlite", ".sock"}
 
 SUSPICIOUS_PATH_PARTS = (
     "../",
@@ -68,7 +71,7 @@ SUSPICIOUS_PATH_PARTS = (
 @dataclass(frozen=True)
 class ScanOptions:
     root: Path
-    include_private: bool = False
+    include_private: bool = True
     max_line_bytes: int = 1024 * 1024
 
 
@@ -84,6 +87,7 @@ class Event:
     status: str = ""
     user: str = ""
     user_agent: str = ""
+    category: str = "other"
     raw: str = ""
 
 
@@ -115,6 +119,8 @@ class IpStats:
 class ScanResult:
     root: Path
     files_scanned: int
+    scanned_files: list[str]
+    skipped_files: list[str]
     events: list[Event]
     ip_stats: dict[str, IpStats]
 
@@ -122,16 +128,27 @@ class ScanResult:
 def scan_backup(options: ScanOptions) -> ScanResult:
     root = options.root.resolve()
     events: list[Event] = []
-    files_scanned = 0
+    scanned_files: list[str] = []
+    skipped_files: list[str] = []
 
     for log_path in discover_log_files(root):
-        files_scanned += 1
+        scanned_files.append(relative_source(root, log_path))
         for event in scan_log_file(root, log_path, options):
             events.append(event)
 
+    journal_dir = root / "var" / "log" / "journal"
+    if journal_dir.exists():
+        if shutil.which("journalctl"):
+            scanned_files.append("var/log/journal")
+            events.extend(scan_journal(root, journal_dir, options))
+        else:
+            skipped_files.append("var/log/journal - journalctl not found")
+
     return ScanResult(
         root=root,
-        files_scanned=files_scanned,
+        files_scanned=len(scanned_files),
+        scanned_files=scanned_files,
+        skipped_files=skipped_files,
         events=events,
         ip_stats=build_ip_stats(events),
     )
@@ -143,20 +160,26 @@ def discover_log_files(root: Path) -> Iterator[Path]:
         search_root = root
 
     for path in search_root.rglob("*"):
-        if path.is_file() and is_probable_log(path):
+        if path.is_file() and is_probable_log(path, search_root):
             yield path
 
 
-def is_probable_log(path: Path) -> bool:
+def is_probable_log(path: Path, search_root: Path) -> bool:
     name = path.name.lower()
-    full_name = str(path).lower()
+    if path.suffix.lower() in SKIP_LOG_SUFFIXES:
+        return False
+    if path.suffix.lower() == ".zst":
+        # Python has no built-in zstd reader; list support can be added with zstandard later.
+        return False
     if ROTATED_LOG_RE.search(name):
         return True
     if LOG_NAME_RE.search(name):
         return True
-    return "/var/log/" in full_name.replace("\\", "/") and (
-        name.endswith((".gz", ".bz2", ".xz")) or "." not in name
-    )
+    try:
+        path.relative_to(search_root)
+    except ValueError:
+        return False
+    return name.endswith((".gz", ".bz2", ".xz")) or "." not in name
 
 
 def scan_log_file(root: Path, path: Path, options: ScanOptions) -> Iterator[Event]:
@@ -176,6 +199,85 @@ def scan_log_file(root: Path, path: Path, options: ScanOptions) -> Iterator[Even
                 yield event
 
 
+def scan_journal(root: Path, journal_dir: Path, options: ScanOptions) -> list[Event]:
+    source = relative_source(root, journal_dir)
+    command = [
+        "journalctl",
+        f"--directory={journal_dir}",
+        "--no-pager",
+        "--output=short-iso",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return []
+
+    events: list[Event] = []
+    if completed.returncode != 0:
+        return events
+
+    for line_number, line in enumerate(completed.stdout.splitlines(), start=1):
+        for event in parse_journal_line(source, line_number, line, options):
+            events.append(event)
+    return events
+
+
+def parse_journal_line(
+    source: str,
+    line_number: int,
+    line: str,
+    options: ScanOptions,
+) -> Iterable[Event]:
+    failed = FAILED_AUTH_RE.search(line)
+    if failed:
+        ip = normalize_ip(failed.group("ip"), options.include_private)
+        if ip:
+            yield Event(
+                ip=ip,
+                kind="failed_login",
+                source=source,
+                line_number=line_number,
+                timestamp=line[:25].strip(),
+                category="auth",
+                raw=line,
+            )
+        return
+
+    accepted = ACCEPTED_AUTH_RE.search(line)
+    if accepted:
+        ip = normalize_ip(accepted.group("ip"), options.include_private)
+        if ip:
+            yield Event(
+                ip=ip,
+                kind="successful_login",
+                source=source,
+                line_number=line_number,
+                timestamp=line[:25].strip(),
+                user=accepted.group("user"),
+                category="auth",
+                raw=line,
+            )
+        return
+
+    for ip in extract_ips(line, options.include_private):
+        yield Event(
+            ip=ip,
+            kind="ip_observed",
+            source=source,
+            line_number=line_number,
+            timestamp=line[:25].strip(),
+            category="system",
+            raw=line,
+        )
+
+
 def open_log_binary(path: Path) -> BinaryIO:
     suffix = path.suffix.lower()
     if suffix == ".gz":
@@ -187,6 +289,10 @@ def open_log_binary(path: Path) -> BinaryIO:
     return path.open("rb")
 
 
+def relative_source(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
 def parse_line(
     root: Path,
     path: Path,
@@ -194,9 +300,10 @@ def parse_line(
     line: str,
     options: ScanOptions,
 ) -> Iterable[Event]:
-    source = str(path.relative_to(root))
+    source = relative_source(root, path)
+    category = categorize_log(path)
 
-    web_event = parse_web_line(source, line_number, line, options)
+    web_event = parse_web_line(source, line_number, line, options, category)
     if web_event is not None:
         yield web_event
         return
@@ -211,6 +318,7 @@ def parse_line(
                 source=source,
                 line_number=line_number,
                 timestamp=extract_syslog_timestamp(line),
+                category=category,
                 raw=line,
             )
         return
@@ -226,6 +334,7 @@ def parse_line(
                 line_number=line_number,
                 timestamp=extract_syslog_timestamp(line),
                 user=accepted.group("user"),
+                category=category,
                 raw=line,
             )
         return
@@ -238,6 +347,7 @@ def parse_line(
                 source=source,
                 line_number=line_number,
                 timestamp=extract_syslog_timestamp(line),
+                category=category,
                 raw=line,
             )
         return
@@ -249,6 +359,7 @@ def parse_line(
             source=source,
             line_number=line_number,
             timestamp=extract_syslog_timestamp(line),
+            category=category,
             raw=line,
         )
 
@@ -258,6 +369,7 @@ def parse_web_line(
     line_number: int,
     line: str,
     options: ScanOptions,
+    category: str,
 ) -> Event | None:
     match = WEB_RE.match(line)
     if not match:
@@ -286,8 +398,25 @@ def parse_web_line(
         url=url,
         status=match.group("status"),
         user_agent=match.group("user_agent") or "",
+        category="web" if category == "other" else category,
         raw=line,
     )
+
+
+def categorize_log(path: Path) -> str:
+    normalized = str(path).replace("\\", "/").lower()
+    name = path.name.lower()
+    if any(part in normalized for part in ("/nginx/", "/apache2/", "/apache/", "/httpd/")):
+        return "web"
+    if "access" in name or "error" in name:
+        return "web"
+    if any(part in name for part in ("auth", "secure", "ssh", "sudo", "fail2ban")):
+        return "auth"
+    if any(part in name for part in ("ufw", "firewall", "iptables", "audit")):
+        return "security"
+    if any(part in name for part in ("syslog", "messages", "kern", "daemon", "cron", "mail")):
+        return "system"
+    return "other"
 
 
 def normalize_ip(value: str, include_private: bool) -> str | None:

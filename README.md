@@ -17,10 +17,10 @@ pip install -e .
 researcher-scan --root /mnt/server-backup --out ./report
 ```
 
-By default, private/local/reserved IPs are excluded from rankings. Include them with:
+By default, all IPs are included. That is useful in incident response because logs often contain proxy, VPN, LAN, or reserved-range addresses. If you only want globally routable public IPs, use:
 
 ```bash
-researcher-scan --root /mnt/server-backup --out ./report --include-private
+researcher-scan --root /mnt/server-backup --out ./report --public-only
 ```
 
 ## What It Reads
@@ -32,13 +32,16 @@ The scanner searches under `/var/log` inside the mounted backup. If `/var/log` i
 - `syslog`, `messages`, `audit.log`, `ufw.log`, `cron`
 - nginx/apache/httpd-style access and error logs
 - gzip, bzip2, and xz compressed logs
+- systemd journal from `/var/log/journal` when `journalctl` is available on the scanning host
 
 ## Reports
 
 The output directory contains:
 
 - `attackers.txt` - human-readable ranking of IPs sorted by attack score and request volume.
-- `events.csv` - raw event table with source file, line number, timestamp, IP, URL/status/user, and original line.
+- `events.csv` - raw event table with source file, category, line number, timestamp, IP, URL/status/user, and original line.
+- `events/` - split CSV reports by category and by original source file, so nginx access logs, auth logs, and system logs do not get mixed together.
+- `scanned_files.txt` - inventory of every scanned log file and how many events were extracted from it.
 - `summary.json` - machine-readable summary with per-IP counters.
 
 Attack score is:

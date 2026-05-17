@@ -33,15 +33,20 @@ class SmokeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            exit_code = main(["--root", str(root), "--out", str(out), "--include-private"])
+            exit_code = main(["--root", str(root), "--out", str(out)])
 
             self.assertEqual(exit_code, 0)
             attackers = (out / "attackers.txt").read_text(encoding="utf-8")
             events = (out / "events.csv").read_text(encoding="utf-8")
+            scanned_files = (out / "scanned_files.txt").read_text(encoding="utf-8")
             self.assertIn("198.51.100.24", attackers)
             self.assertIn("suspicious_web_requests: 2", attackers)
             self.assertIn("failed_logins: 1", attackers)
             self.assertIn("access.log.1.gz", events)
+            self.assertIn("category", events)
+            self.assertIn("nginx/access.log - events: 2", scanned_files)
+            self.assertTrue((out / "events" / "web.csv").exists())
+            self.assertTrue((out / "events" / "auth.csv").exists())
 
 
 if __name__ == "__main__":
