@@ -700,14 +700,3 @@ git push origin v0.1.1
 researcher-0.1.1.tar.gz
 researcher-0.1.1-py3-none-any.whl
 ```
-
-## Что Можно Добавить Дальше
-
-Основные triage-отчеты уже есть. Следующие полезные улучшения:
-
-- HTML-отчет;
-- SQLite-база для больших расследований;
-- более точный парсинг auditd;
-- группировка событий в incident chains;
-- сравнение с known-good baseline;
-- экспорт в STIX/OpenIOC.
