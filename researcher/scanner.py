@@ -78,6 +78,8 @@ class ScanOptions:
     root: Path
     include_private: bool = True
     max_line_bytes: int = 1024 * 1024
+    yara_rules: list[Path] = field(default_factory=list)
+    builtin_yara: bool = True
 
 
 @dataclass
@@ -153,7 +155,7 @@ def scan_backup(options: ScanOptions) -> ScanResult:
         else:
             skipped_files.append("var/log/journal - journalctl not found")
 
-    artifacts = scan_artifacts(root)
+    artifacts = scan_artifacts(root, yara_rules=options.yara_rules, builtin_yara=options.builtin_yara)
 
     return ScanResult(
         root=root,

@@ -333,6 +333,7 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
             "- `indicators/` - risk scores and compromise indicators.",
             "- `iocs/` - IP, URL, domain, hash, email and user-agent exports.",
             "- `accounts/`, `persistence/`, `commands/`, `web_compromise/`, `filesystem/`, `secrets/`, `archives/` - artifact triage.",
+            "- `yara/` - YARA matches or YARA availability/compile diagnostics when `--yara-rules` is used.",
         ]
     )
 
@@ -513,6 +514,7 @@ def write_artifact_reports(out_dir: Path, findings: list[ArtifactFinding]) -> No
         "filesystem": "filesystem",
         "secrets": "secrets",
         "archives": "archives",
+        "yara": "yara",
     }
     for category, category_findings in sorted(by_category.items()):
         directory = out_dir / directory_by_category.get(category, "artifacts")

@@ -53,6 +53,8 @@ pip install -e .
 researcher-scan --help
 ```
 
+YARA-поиск встроен в пакет: `researcher` ставит `yara-python` и поставляется с базовым набором правил для webshell/reverse-shell/download-and-execute паттернов.
+
 ## Readonly-Монтирование
 
 Пример через `guestmount`:
@@ -110,6 +112,22 @@ less ./report/attackers.txt
 
 ```bash
 researcher-scan --root /mnt/vm --out ./report --public-only
+```
+
+Встроенные YARA-правила запускаются автоматически. Если хочешь добавить свои правила:
+
+Можно передать файл или директорию, и можно указать несколько раз:
+
+```bash
+researcher-scan --root /mnt/vm --out ./report \
+  --yara-rules ./webshells.yar \
+  --yara-rules ./malware-rules/
+```
+
+Отключить встроенные правила:
+
+```bash
+researcher-scan --root /mnt/vm --out ./report --no-builtin-yara
 ```
 
 По умолчанию учитываются все IP, включая private/local/reserved. Это сделано специально: в реальных инцидентах в логах часто видны IP reverse proxy, VPN, NAT, Docker-сетей или внутренних балансировщиков.
@@ -305,6 +323,9 @@ report/
   archives/
     archives.csv
     archives.txt
+  yara/
+    yara.csv
+    yara.txt
   network/
     network_artifacts.txt
   events/
@@ -503,6 +524,29 @@ Filesystem triage:
 - `.env`, token/password/key hints;
 - `.sql`, `.dump`, `.zip`, `.tar.gz`, `.bak`, backup/archive files.
 
+### `yara/`
+
+YARA-поиск запускается автоматически встроенными правилами. `--yara-rules` добавляет внешние правила поверх встроенных.
+
+Сканируются наиболее интересные директории:
+
+- `/var/www`;
+- `/srv/www`;
+- `/tmp`;
+- `/dev/shm`;
+- `/usr/local/bin`;
+- `/opt`.
+
+В `yara/yara.csv` и `yara/yara.txt` попадают:
+
+- имя совпавшего правила;
+- namespace правила;
+- путь к файлу;
+- размер, mtime и sha256 файла;
+- matched string identifiers, если доступны.
+
+Если `yara-python` не установлен или установка окружения сломана, инструмент не падает. Он создает finding `yara_unavailable` и пишет диагностическое сообщение.
+
 ## Attack Score И Risk Score
 
 Сейчас рейтинг считается так:
@@ -546,7 +590,8 @@ Risk level:
 7. Посмотри `source` и `line_number`, чтобы перейти к исходному логу.
 8. Проверь `timeline.csv`, чтобы увидеть порядок событий.
 9. Проверь `accounts/`, `persistence/`, `commands/`, `web_compromise/`.
-10. Забери IOC из `iocs/` для блокировок или дальнейшего поиска.
+10. Если запускал `--yara-rules`, проверь `yara/`.
+11. Забери IOC из `iocs/` для блокировок или дальнейшего поиска.
 
 Примеры:
 
@@ -661,7 +706,6 @@ researcher-0.1.1-py3-none-any.whl
 Основные triage-отчеты уже есть. Следующие полезные улучшения:
 
 - HTML-отчет;
-- YARA-поиск по `/var/www`, `/tmp`, `/dev/shm`;
 - SQLite-база для больших расследований;
 - более точный парсинг auditd;
 - группировка событий в incident chains;

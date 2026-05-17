@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import gzip
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,12 @@ class SmokeTest(unittest.TestCase):
             self.assertTrue((out / "web_compromise" / "web_compromise.csv").exists())
             self.assertTrue((out / "secrets" / "secrets.csv").exists())
             self.assertTrue((out / "indicators" / "risk_scores.csv").exists())
+            self.assertTrue((out / "yara" / "yara.csv").exists())
+            yara_report = (out / "yara" / "yara.csv").read_text(encoding="utf-8")
+            if importlib.util.find_spec("yara") is None:
+                self.assertIn("yara_unavailable", yara_report)
+            else:
+                self.assertIn("Researcher_PHP_Webshell_Common", yara_report)
 
 
 if __name__ == "__main__":

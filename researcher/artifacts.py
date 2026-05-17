@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import importlib.resources as resources
 import re
 import stat
 from dataclasses import dataclass, field
@@ -95,7 +97,12 @@ class ArtifactScan:
     emails: set[str] = field(default_factory=set)
 
 
-def scan_artifacts(root: Path, max_files_per_area: int = 20000) -> ArtifactScan:
+def scan_artifacts(
+    root: Path,
+    max_files_per_area: int = 20000,
+    yara_rules: list[Path] | None = None,
+    builtin_yara: bool = True,
+) -> ArtifactScan:
     scan = ArtifactScan()
     scan_accounts(root, scan)
     scan_persistence(root, scan)
@@ -103,7 +110,92 @@ def scan_artifacts(root: Path, max_files_per_area: int = 20000) -> ArtifactScan:
     scan_web(root, scan, max_files_per_area)
     scan_filesystem_triage(root, scan, max_files_per_area)
     scan_secret_and_archive_hints(root, scan, max_files_per_area)
+    if builtin_yara or yara_rules:
+        scan_yara(root, scan, yara_rules or [], max_files_per_area, builtin_yara)
     return scan
+
+
+def scan_yara(root: Path, scan: ArtifactScan, rule_inputs: list[Path], max_files: int, builtin_yara: bool) -> None:
+    if importlib.util.find_spec("yara") is None:
+        add_finding(
+            scan,
+            "yara_unavailable",
+            "yara",
+            root,
+            root,
+            "low",
+            detail="yara-python is not installed; reinstall researcher so package dependencies are installed",
+        )
+        return
+
+    import yara  # type: ignore[import-not-found]
+
+    rule_files = discover_yara_rule_files(rule_inputs)
+    compiled_rules = []
+
+    if builtin_yara:
+        try:
+            builtin_source = resources.files("researcher.rules").joinpath("builtin.yar").read_text(encoding="utf-8")
+            compiled_rules.append(yara.compile(source=builtin_source))
+        except Exception as error:
+            add_finding(scan, "yara_builtin_compile_error", "yara", root, root, "medium", detail=str(error))
+
+    if rule_files:
+        try:
+            compiled_rules.append(yara.compile(filepaths={safe_rule_namespace(path): str(path) for path in rule_files}))
+        except Exception as error:
+            add_finding(scan, "yara_compile_error", "yara", rule_files[0], root, "medium", detail=str(error))
+    elif rule_inputs:
+        for path in rule_inputs:
+            add_finding(scan, "yara_rules_not_found", "yara", path, root, "low", detail="no .yar/.yara files found")
+
+    if not compiled_rules:
+        return
+
+    targets = [
+        root / "var" / "www",
+        root / "srv" / "www",
+        root / "tmp",
+        root / "dev" / "shm",
+        root / "usr" / "local" / "bin",
+        root / "opt",
+    ]
+    for base in targets:
+        for path in limited_files(base, max_files):
+            for rules in compiled_rules:
+                try:
+                    matches = rules.match(str(path), timeout=10)
+                except Exception as error:
+                    add_finding(scan, "yara_scan_error", "yara", path, root, "low", detail=str(error))
+                    continue
+                for match in matches:
+                    strings = []
+                    for string_match in getattr(match, "strings", []):
+                        identifier = getattr(string_match, "identifier", "")
+                        if identifier:
+                            strings.append(identifier)
+                    detail = f"rule={match.rule} namespace={match.namespace}"
+                    if strings:
+                        detail += f" strings={','.join(sorted(set(strings))[:10])}"
+                    add_file_finding(scan, root, path, "yara_match", "yara", "high")
+                    scan.findings[-1].detail = detail
+
+
+def discover_yara_rule_files(paths: list[Path]) -> list[Path]:
+    rule_files: list[Path] = []
+    for path in paths:
+        expanded = path.expanduser()
+        if expanded.is_file() and expanded.suffix.lower() in (".yar", ".yara"):
+            rule_files.append(expanded)
+        elif expanded.is_dir():
+            for child in safe_rglob(expanded, "*"):
+                if child.is_file() and child.suffix.lower() in (".yar", ".yara"):
+                    rule_files.append(child)
+    return rule_files
+
+
+def safe_rule_namespace(path: Path) -> str:
+    return re.sub(r"[^A-Za-z0-9_]+", "_", path.stem) or "rule"
 
 
 def scan_accounts(root: Path, scan: ArtifactScan) -> None:

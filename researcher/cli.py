@@ -46,6 +46,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=1024 * 1024,
         help="Skip individual log lines larger than this many bytes. Default: 1048576.",
     )
+    parser.add_argument(
+        "--yara-rules",
+        action="append",
+        default=[],
+        type=Path,
+        help="Additional YARA rule file or directory. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--no-builtin-yara",
+        action="store_false",
+        dest="builtin_yara",
+        help="Disable bundled YARA rules.",
+    )
     return parser
 
 
@@ -101,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         root=root,
         include_private=args.include_private,
         max_line_bytes=args.max_line_bytes,
+        yara_rules=[path.expanduser() for path in args.yara_rules],
+        builtin_yara=args.builtin_yara,
     )
     result = scan_backup(options)
     write_reports(result, out)

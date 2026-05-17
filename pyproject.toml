@@ -7,13 +7,16 @@ name = "researcher"
 dynamic = ["version"]
 description = "Readonly Linux server backup log scanner for DFIR triage"
 requires-python = ">=3.10"
-dependencies = ["zstandard>=0.23"]
+dependencies = ["yara-python>=4.5", "zstandard>=0.23"]
 
 [project.scripts]
 researcher-scan = "researcher.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools.package-data]
+"researcher.rules" = ["*.yar"]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
