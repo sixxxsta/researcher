@@ -45,16 +45,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_root(parser: argparse.ArgumentParser, raw_root: Path) -> Path:
+    root = raw_root.expanduser()
+    if root.exists() and root.is_dir():
+        return root
+
+    details = [
+        f"received: {raw_root}",
+        f"expanded: {root}",
+        f"current directory: {Path.cwd()}",
+    ]
+    if not root.exists():
+        details.append("problem: expanded path does not exist")
+    elif not root.is_dir():
+        details.append("problem: expanded path exists but is not a directory")
+
+    parser.error("--root is not a readable mounted directory\n  " + "\n  ".join(details))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    root = args.root.expanduser()
+    root = validate_root(parser, args.root)
     out = args.out.expanduser()
-
-    if not root.exists():
-        parser.error(f"--root does not exist: {root}")
-    if not root.is_dir():
-        parser.error(f"--root is not a directory: {root}")
 
     options = ScanOptions(
         root=root,
