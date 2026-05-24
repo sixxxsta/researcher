@@ -14,7 +14,7 @@ from .scanner import ScanOptions, scan_backup
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="researcher-scan",
-        description="Scan a readonly-mounted Linux backup and extract attacker IP evidence from logs.",
+        description="Scan a readonly-mounted Linux or Windows backup and extract attacker evidence from logs.",
     )
     parser.add_argument(
         "--root",
@@ -120,8 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     result = scan_backup(options)
     write_reports(result, out)
 
-    print(f"Scanned {result.files_scanned} log files, found {len(result.ip_stats)} IPs.")
-    if result.files_scanned == 0:
-        print("No log files were discovered. Check that --root points to the mounted Linux filesystem root.")
+    print(f"Detected OS: {result.os_type}")
+    print(f"Scanned {result.files_scanned} log inputs, found {len(result.ip_stats)} IPs.")
+    if result.os_type == "unknown":
+        print("Could not detect Linux or Windows layout. Check that --root points to the mounted filesystem root.")
+    elif result.files_scanned == 0:
+        print(f"No log inputs were discovered for this {result.os_type} backup.")
     print(f"Reports written to: {out}")
     return 0

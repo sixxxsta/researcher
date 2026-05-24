@@ -1,3 +1,8 @@
 """Readonly forensic log scanner for mounted Linux server backups."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("researcher")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"

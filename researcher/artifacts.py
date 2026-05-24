@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from .threats import EXTORTION_RE, classify_command_threat, is_ransom_note_name
+
 
 URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 DOMAIN_RE = re.compile(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b")
@@ -110,12 +112,20 @@ def scan_artifacts(
     scan_web(root, scan, max_files_per_area)
     scan_filesystem_triage(root, scan, max_files_per_area)
     scan_secret_and_archive_hints(root, scan, max_files_per_area)
+    scan_threat_artifacts(root, scan, max_files_per_area)
     if builtin_yara or yara_rules:
         scan_yara(root, scan, yara_rules or [], max_files_per_area, builtin_yara)
     return scan
 
 
-def scan_yara(root: Path, scan: ArtifactScan, rule_inputs: list[Path], max_files: int, builtin_yara: bool) -> None:
+def scan_yara(
+    root: Path,
+    scan: ArtifactScan,
+    rule_inputs: list[Path],
+    max_files: int,
+    builtin_yara: bool,
+    targets: list[Path] | None = None,
+) -> None:
     if importlib.util.find_spec("yara") is None:
         add_finding(
             scan,
@@ -152,17 +162,21 @@ def scan_yara(root: Path, scan: ArtifactScan, rule_inputs: list[Path], max_files
     if not compiled_rules:
         return
 
-    targets = [
-        root / "var" / "www",
-        root / "srv" / "www",
-        root / "tmp",
-        root / "dev" / "shm",
-        root / "usr" / "local" / "bin",
-        root / "opt",
-    ]
+    if targets is None:
+        targets = [
+            root / "var" / "www",
+            root / "srv" / "www",
+            root / "tmp",
+            root / "dev" / "shm",
+            root / "usr" / "local" / "bin",
+            root / "opt",
+        ]
+
     scanned_files = 0
     match_count = 0
     for base in targets:
+        if not base.exists():
+            continue
         for path in limited_files(base, max_files):
             scanned_files += 1
             for rules in compiled_rules:
@@ -309,6 +323,9 @@ def scan_histories(root: Path, scan: ArtifactScan) -> None:
                 severity = "high" if SUSPICIOUS_COMMAND_RE.search(line) else "info"
                 add_finding(scan, "shell_history", "commands", path, root, severity, line_number, value=line[:300])
                 collect_iocs(scan, line)
+                threat = classify_command_threat(line)
+                if threat:
+                    add_finding(scan, threat, "threats", path, root, "high", line_number, value=line[:300])
 
 
 def scan_web(root: Path, scan: ArtifactScan, max_files: int) -> None:
@@ -348,6 +365,53 @@ def scan_secret_and_archive_hints(root: Path, scan: ArtifactScan, max_files: int
                 collect_matching_lines(scan, root, path, "secret_hint_line", "secrets", SECRET_RE, "medium")
             if any(suffix in ARCHIVE_SUFFIXES for suffix in suffixes) or lower.endswith((".tar.gz", ".tar.xz", ".tar.bz2")):
                 add_file_finding(scan, root, path, "archive_or_dump", "archives", "low")
+
+
+def scan_threat_artifacts(root: Path, scan: ArtifactScan, max_files: int) -> None:
+    areas = [
+        root / "home",
+        root / "root",
+        root / "var" / "www",
+        root / "tmp",
+        root / "dev" / "shm",
+        root / "opt",
+        root / "etc",
+        root / "Users",
+        root / "inetpub" / "wwwroot",
+        root / "ProgramData",
+        root / "Windows" / "Temp",
+        root / "Windows" / "System32" / "Tasks",
+    ]
+    for area in areas:
+        for path in limited_files(area, max_files):
+            if is_ransom_note_name(path.name):
+                add_file_finding(scan, root, path, "ransom_note_file", "threats", "high")
+            if path.suffix.lower() not in TEXT_SUFFIXES and path.name.lower() not in {"readme", "readme.txt"}:
+                continue
+            for line_number, line in iter_text_lines(path):
+                threat = classify_command_threat(line)
+                if threat:
+                    add_finding(
+                        scan,
+                        threat,
+                        "threats",
+                        path,
+                        root,
+                        "high",
+                        line_number,
+                        value=line.strip()[:300],
+                    )
+                if EXTORTION_RE.search(line):
+                    add_finding(
+                        scan,
+                        "extortion_indicator",
+                        "threats",
+                        path,
+                        root,
+                        "high",
+                        line_number,
+                        value=line.strip()[:300],
+                    )
 
 
 def collect_config_lines(scan: ArtifactScan, root: Path, path: Path, kind: str, category: str) -> None:

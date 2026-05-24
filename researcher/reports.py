@@ -10,6 +10,19 @@ from typing import Any
 
 from .artifacts import DOMAIN_RE, HASH_RE, SUSPICIOUS_COMMAND_RE, URL_RE, ArtifactFinding
 from .scanner import Event, IpStats, ScanResult
+from .threats import (
+    EXTORTION_KINDS,
+    INJECTION_KINDS,
+    OUTBOUND_ATTACK_KINDS,
+    collect_outbound_ip_hits,
+    summarize_outbound_ip_hits,
+    summarize_threat_events,
+    threat_kind_label,
+)
+
+
+def backup_os_label(os_type: str) -> str:
+    return {"linux": "Linux", "windows": "Windows", "unknown": "Unknown"}.get(os_type, os_type)
 
 
 def write_reports(result: ScanResult, out_dir: Path) -> None:
@@ -28,6 +41,7 @@ def write_reports(result: ScanResult, out_dir: Path) -> None:
     write_artifact_reports(out_dir, result.artifacts.findings)
     write_downloaded_payloads_report(out_dir / "commands" / "downloaded_payloads.txt", result)
     write_network_artifacts_report(out_dir / "network" / "network_artifacts.txt", result)
+    write_threat_reports(out_dir / "threats", result)
     write_summary_json(out_dir / "summary.json", result, ranked)
 
 
@@ -47,7 +61,7 @@ def rank_attackers(stats: Any) -> list[IpStats]:
 
 def write_attackers_txt(path: Path, result: ScanResult, ranked: list[IpStats]) -> None:
     lines: list[str] = []
-    lines.append("Researcher forensic scan report")
+    lines.append(f"Researcher {backup_os_label(result.os_type)} forensic scan report")
     lines.append(f"Generated UTC: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"Root: {result.root}")
     lines.append(f"Log files scanned: {result.files_scanned}")
@@ -92,6 +106,7 @@ def write_scanned_files_txt(path: Path, result: ScanResult) -> None:
     category_counts = Counter(event.category for event in result.events)
     lines = [
         "Scanned log files",
+        f"Detected OS: {backup_os_label(result.os_type)}",
         f"Root: {result.root}",
         f"Total files: {result.files_scanned}",
         "",
@@ -169,11 +184,14 @@ def write_executive_summary(path: Path, result: ScanResult, ranked: list[IpStats
     high_findings = [finding for finding in result.artifacts.findings if finding.severity == "high"]
     medium_findings = [finding for finding in result.artifacts.findings if finding.severity == "medium"]
     successful = [event for event in result.events if event.kind == "successful_login"]
-    suspicious_web = [event for event in result.events if event.kind == "suspicious_web_request"]
+    suspicious_web = [event for event in result.events if event.kind in INJECTION_KINDS]
+    outbound = [event for event in result.events if event.kind in OUTBOUND_ATTACK_KINDS]
+    extortion_events = [event for event in result.events if event.kind in EXTORTION_KINDS]
+    threat_findings = [f for f in result.artifacts.findings if f.category == "threats"]
     compromise = compromise_candidates(result)
 
     lines = [
-        "Researcher executive summary",
+        f"Researcher {backup_os_label(result.os_type)} executive summary",
         f"Generated UTC: {datetime.now(timezone.utc).isoformat()}",
         f"Root: {result.root}",
         "",
@@ -185,7 +203,10 @@ def write_executive_summary(path: Path, result: ScanResult, ranked: list[IpStats
         f"  high artifact findings: {len(high_findings)}",
         f"  medium artifact findings: {len(medium_findings)}",
         f"  successful logins: {len(successful)}",
-        f"  suspicious web requests: {len(suspicious_web)}",
+        f"  injection/exploit web attempts: {len(suspicious_web)}",
+        f"  outbound attack tool events: {len(outbound)}",
+        f"  extortion/ransom indicators: {len(extortion_events) + len([f for f in threat_findings if 'extortion' in f.kind or f.kind == 'ransom_note_file'])}",
+        f"  threat artifact findings: {len(threat_findings)}",
         f"  brute-force-then-success candidates: {len(compromise)}",
         "",
         "Top suspicious IPs:",
@@ -216,12 +237,16 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
     high_findings = [finding for finding in result.artifacts.findings if finding.severity == "high"]
     medium_findings = [finding for finding in result.artifacts.findings if finding.severity == "medium"]
     successful = [event for event in result.events if event.kind == "successful_login"]
-    suspicious_web = [event for event in result.events if event.kind == "suspicious_web_request"]
+    suspicious_web = [event for event in result.events if event.kind in INJECTION_KINDS]
+    outbound = [event for event in result.events if event.kind in OUTBOUND_ATTACK_KINDS]
+    extortion_events = [event for event in result.events if event.kind in EXTORTION_KINDS]
+    threat_findings = [f for f in result.artifacts.findings if f.category == "threats"]
     compromise = compromise_candidates(result)
 
     lines = [
-        "# Researcher Incident Report",
+        f"# Researcher {backup_os_label(result.os_type)} Incident Report",
         "",
+        f"- Detected OS: `{result.os_type}`",
         f"- Generated UTC: `{datetime.now(timezone.utc).isoformat()}`",
         f"- Root: `{result.root}`",
         f"- Scanned log inputs: `{result.files_scanned}`",
@@ -232,7 +257,9 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
         "## Executive Summary",
         "",
         f"- Successful logins: **{len(successful)}**",
-        f"- Suspicious web requests: **{len(suspicious_web)}**",
+        f"- Injection/exploit web attempts: **{len(suspicious_web)}**",
+        f"- Outbound attack tool events: **{len(outbound)}**",
+        f"- Extortion/ransom indicators: **{len(extortion_events) + len([f for f in threat_findings if 'extortion' in f.kind or f.kind == 'ransom_note_file'])}**",
         f"- Brute-force-then-success candidates: **{len(compromise)}**",
         f"- High artifact findings: **{len(high_findings)}**",
         f"- Medium artifact findings: **{len(medium_findings)}**",
@@ -303,7 +330,7 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
     else:
         lines.append("No artifact findings.")
 
-    lines.extend(["", "## Suspicious Web Requests", ""])
+    lines.extend(["", "## Injection And Exploit Attempts", ""])
     if suspicious_web:
         lines.extend(
             markdown_table(
@@ -321,7 +348,100 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
             )
         )
     else:
-        lines.append("No suspicious web requests found.")
+        lines.append("No injection or exploit web attempts found.")
+
+    lines.extend(["", "## Outbound Attack Indicators", ""])
+    if outbound:
+        lines.extend(
+            markdown_table(
+                ["Kind", "IP", "Source", "Line", "Evidence"],
+                [
+                    [
+                        threat_kind_label(event.kind),
+                        event.ip,
+                        event.source,
+                        str(event.line_number),
+                        truncate_markdown(event.raw, 120),
+                    ]
+                    for event in outbound[:30]
+                ],
+            )
+        )
+    else:
+        lines.append("No DDoS/scanner/lateral movement tool usage found in logs.")
+
+    outbound_hits = collect_outbound_ip_hits(outbound, threat_findings)
+    outbound_summary = summarize_outbound_ip_hits(outbound_hits)
+    target_ips = sorted(
+        (
+            (ip, data)
+            for ip, data in outbound_summary.items()
+            if isinstance(data["roles"], Counter) and data["roles"].get("target", 0) > 0
+        ),
+        key=lambda item: int(item[1]["hits"]),
+        reverse=True,
+    )
+    lines.extend(["", "## Outbound Target IPs", ""])
+    if target_ips:
+        lines.extend(
+            markdown_table(
+                ["IP", "Hits", "Threat Kinds", "Sources"],
+                [
+                    [
+                        ip,
+                        str(data["hits"]),
+                        markdown_counter(data["kinds"], 3) if isinstance(data["kinds"], Counter) else "",
+                        markdown_counter(data["sources"], 3) if isinstance(data["sources"], Counter) else "",
+                    ]
+                    for ip, data in target_ips[:20]
+                ],
+            )
+        )
+    else:
+        lines.append("No target IPs extracted from outbound attack commands.")
+
+    lines.extend(["", "## Extortion And Ransom Indicators", ""])
+    extortion_findings = [
+        f
+        for f in threat_findings
+        if f.kind in {"extortion_indicator", "ransom_note_file"} or "extortion" in f.kind
+    ]
+    if extortion_events or extortion_findings:
+        if extortion_events:
+            lines.extend(
+                markdown_table(
+                    ["Kind", "IP", "Source", "Line", "Evidence"],
+                    [
+                        [
+                            threat_kind_label(event.kind),
+                            event.ip,
+                            event.source,
+                            str(event.line_number),
+                            truncate_markdown(event.raw, 120),
+                        ]
+                        for event in extortion_events[:20]
+                    ],
+                )
+            )
+        if extortion_findings:
+            if extortion_events:
+                lines.append("")
+            lines.extend(
+                markdown_table(
+                    ["Kind", "Path", "Line", "Evidence"],
+                    [
+                        [
+                            finding.kind,
+                            finding.path,
+                            str(finding.line_number or ""),
+                            truncate_markdown(finding.value or finding.detail, 120),
+                        ]
+                        for finding in extortion_findings[:20]
+                    ],
+                )
+            )
+    else:
+        lines.append("No extortion or ransom indicators found.")
 
     lines.extend(["", "## Report Files", ""])
     lines.extend(
@@ -332,7 +452,7 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
             "- `events.csv` and `events/` - raw event tables.",
             "- `indicators/` - risk scores and compromise indicators.",
             "- `iocs/` - IP, URL, domain, hash, email and user-agent exports.",
-            "- `accounts/`, `persistence/`, `commands/`, `web_compromise/`, `filesystem/`, `secrets/`, `archives/` - artifact triage.",
+            "- `accounts/`, `persistence/`, `commands/`, `web_compromise/`, `filesystem/`, `secrets/`, `archives/`, `threats/` - artifact triage.",
             "- `yara/` - YARA matches or YARA availability/compile diagnostics when `--yara-rules` is used.",
         ]
     )
@@ -343,15 +463,26 @@ def write_markdown_report(path: Path, result: ScanResult, ranked: list[IpStats])
             lines.append(f"- `{skipped}`")
 
     lines.extend(["", "## Suggested Manual Checks", ""])
-    lines.extend(
-        [
-            "1. Verify all critical/high findings against the original evidence paths.",
-            "2. Review successful SSH logins and nearby sudo/history activity.",
-            "3. Inspect webshell-like files and upload directories manually.",
-            "4. Check persistence findings before restoring the server.",
-            "5. Export IOCs from `iocs/` into blocking and hunting systems.",
-        ]
-    )
+    if result.os_type == "windows":
+        lines.extend(
+            [
+                "1. Verify IIS and Security.evtx findings against original log paths.",
+                "2. Review successful/failed logon events and RDP activity.",
+                "3. Inspect inetpub and upload directories manually.",
+                "4. Check Scheduled Tasks and PowerShell history before restoring the server.",
+                "5. Export IOCs from `iocs/` into blocking and hunting systems.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "1. Verify all critical/high findings against the original evidence paths.",
+                "2. Review successful SSH logins and nearby sudo/history activity.",
+                "3. Inspect webshell-like files and upload directories manually.",
+                "4. Check persistence findings before restoring the server.",
+                "5. Export IOCs from `iocs/` into blocking and hunting systems.",
+            ]
+        )
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -500,6 +631,23 @@ def write_ioc_exports(out_dir: Path, result: ScanResult) -> None:
     write_lines(out_dir / "hashes.txt", sorted(hashes))
     write_lines(out_dir / "emails.txt", sorted(result.artifacts.emails))
 
+    outbound_findings = [
+        finding
+        for finding in result.artifacts.findings
+        if finding.category == "threats" and finding.kind in OUTBOUND_ATTACK_KINDS
+    ]
+    outbound_hits = collect_outbound_ip_hits(
+        [event for event in result.events if event.kind in OUTBOUND_ATTACK_KINDS],
+        outbound_findings,
+    )
+    outbound_summary = summarize_outbound_ip_hits(outbound_hits)
+    target_ips = sorted(
+        ip
+        for ip, data in outbound_summary.items()
+        if isinstance(data["roles"], Counter) and data["roles"].get("target", 0) > 0
+    )
+    write_lines(out_dir / "outbound_targets.txt", target_ips)
+
 
 def write_artifact_reports(out_dir: Path, findings: list[ArtifactFinding]) -> None:
     by_category: dict[str, list[ArtifactFinding]] = {}
@@ -570,6 +718,170 @@ def write_network_artifacts_report(path: Path, result: ScanResult) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_threat_reports(out_dir: Path, result: ScanResult) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    injections = [event for event in result.events if event.kind in INJECTION_KINDS]
+    outbound_events = [event for event in result.events if event.kind in OUTBOUND_ATTACK_KINDS]
+    extortion_events = [event for event in result.events if event.kind in EXTORTION_KINDS]
+    threat_findings = [finding for finding in result.artifacts.findings if finding.category == "threats"]
+    outbound_findings = [
+        finding
+        for finding in threat_findings
+        if finding.kind in OUTBOUND_ATTACK_KINDS
+    ]
+    extortion_findings = [
+        finding
+        for finding in threat_findings
+        if finding.kind in {"extortion_indicator", "ransom_note_file"} or "extortion" in finding.kind
+    ]
+    outbound_hits = collect_outbound_ip_hits(outbound_events, outbound_findings)
+    outbound_summary = summarize_outbound_ip_hits(outbound_hits)
+    target_ip_count = sum(
+        1
+        for data in outbound_summary.values()
+        if isinstance(data["roles"], Counter) and data["roles"].get("target", 0) > 0
+    )
+    counts = summarize_threat_events(result.events)
+
+    summary_lines = [
+        "Threat summary",
+        "",
+        f"Injection/exploit web attempts: {len(injections)}",
+        f"Outbound attack tool log events: {len(outbound_events)}",
+        f"Outbound attack artifact findings: {len(outbound_findings)}",
+        f"Outbound target IPs extracted: {target_ip_count}",
+        f"Extortion log events: {len(extortion_events)}",
+        f"Extortion/ransom artifact findings: {len(extortion_findings)}",
+        "",
+        "Event counts by kind:",
+    ]
+    if counts:
+        for kind, count in counts.most_common():
+            summary_lines.append(f"  {threat_kind_label(kind)} ({kind}): {count}")
+    else:
+        summary_lines.append("  none")
+    (out_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+    write_events_csv(out_dir / "injections.csv", injections)
+
+    outbound_lines = ["Outbound attack indicators", ""]
+    if outbound_events:
+        outbound_lines.append("From logs:")
+        for event in outbound_events[:100]:
+            outbound_lines.append(
+                f"  [{threat_kind_label(event.kind)}] ip={event.ip} source={event.source}:{event.line_number} "
+                f"{truncate_markdown(event.raw, 160)}"
+            )
+    if outbound_findings:
+        if outbound_events:
+            outbound_lines.append("")
+        outbound_lines.append("From artifacts:")
+        for finding in outbound_findings[:100]:
+            where = f"{finding.path}:{finding.line_number}" if finding.line_number else finding.path
+            outbound_lines.append(
+                f"  [{finding.kind}] {where} {truncate_markdown(finding.value or finding.detail, 160)}"
+            )
+    if len(outbound_lines) == 2:
+        outbound_lines.append("No DDoS/scanner/lateral movement indicators found.")
+    (out_dir / "outbound_attacks.txt").write_text("\n".join(outbound_lines) + "\n", encoding="utf-8")
+
+    extortion_lines = ["Extortion and ransom indicators", ""]
+    if extortion_events:
+        extortion_lines.append("From logs:")
+        for event in extortion_events[:100]:
+            extortion_lines.append(
+                f"  ip={event.ip} source={event.source}:{event.line_number} "
+                f"{truncate_markdown(event.raw, 160)}"
+            )
+    if extortion_findings:
+        if extortion_events:
+            extortion_lines.append("")
+        extortion_lines.append("From artifacts:")
+        for finding in extortion_findings[:100]:
+            where = f"{finding.path}:{finding.line_number}" if finding.line_number else finding.path
+            extortion_lines.append(
+                f"  [{finding.kind}] {where} {truncate_markdown(finding.value or finding.detail, 160)}"
+            )
+    if len(extortion_lines) == 2:
+        extortion_lines.append("No extortion or ransom indicators found.")
+    (out_dir / "extortion.txt").write_text("\n".join(extortion_lines) + "\n", encoding="utf-8")
+
+    write_findings_csv(out_dir / "threats.csv", threat_findings)
+    write_findings_txt(out_dir / "threats.txt", threat_findings)
+    write_outbound_ips_reports(out_dir, outbound_events, outbound_findings)
+
+
+def write_outbound_ips_reports(out_dir: Path, outbound_events, outbound_findings) -> None:
+    hits = collect_outbound_ip_hits(outbound_events, outbound_findings)
+    summary = summarize_outbound_ip_hits(hits)
+
+    with (out_dir / "outbound_ips.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["ip", "role", "threat_kind", "source", "line_number", "evidence"],
+        )
+        writer.writeheader()
+        for hit in hits:
+            writer.writerow(
+                {
+                    "ip": hit.ip,
+                    "role": hit.role,
+                    "threat_kind": hit.threat_kind,
+                    "source": hit.source,
+                    "line_number": hit.line_number or "",
+                    "evidence": hit.evidence,
+                }
+            )
+
+    lines = [
+        "Outbound IP report",
+        "",
+        "Target IPs are extracted from outbound attack commands (nmap, hping, /dev/tcp/, etc.).",
+        "Actor IPs are session/source IPs from logs tied to the same outbound tool usage.",
+        "",
+    ]
+    if not summary:
+        lines.append("No outbound attack IPs extracted.")
+    else:
+        targets = [
+            (ip, data)
+            for ip, data in summary.items()
+            if isinstance(data["roles"], Counter) and data["roles"].get("target", 0) > 0
+        ]
+        actors = [
+            (ip, data)
+            for ip, data in summary.items()
+            if isinstance(data["roles"], Counter) and data["roles"].get("actor", 0) > 0
+        ]
+        lines.extend(["Target IPs (likely scan/attack destinations):", ""])
+        if targets:
+            for ip, data in sorted(targets, key=lambda item: int(item[1]["hits"]), reverse=True):
+                kinds = data["kinds"]
+                sources = data["sources"]
+                assert isinstance(kinds, Counter)
+                assert isinstance(sources, Counter)
+                kind_text = ", ".join(f"{threat_kind_label(k)}({v})" for k, v in kinds.most_common())
+                source_text = ", ".join(f"{src}({count})" for src, count in sources.most_common(3))
+                lines.append(f"  {ip} hits={data['hits']} kinds={kind_text} sources={source_text}")
+        else:
+            lines.append("  none")
+
+        lines.extend(["", "Actor IPs (sessions tied to outbound tool usage in logs):", ""])
+        if actors:
+            for ip, data in sorted(actors, key=lambda item: int(item[1]["hits"]), reverse=True):
+                kinds = data["kinds"]
+                sources = data["sources"]
+                assert isinstance(kinds, Counter)
+                assert isinstance(sources, Counter)
+                kind_text = ", ".join(f"{threat_kind_label(k)}({v})" for k, v in kinds.most_common())
+                source_text = ", ".join(f"{src}({count})" for src, count in sources.most_common(3))
+                lines.append(f"  {ip} hits={data['hits']} kinds={kind_text} sources={source_text}")
+        else:
+            lines.append("  none")
+
+    (out_dir / "outbound_ips.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def write_findings_csv(path: Path, findings: list[ArtifactFinding]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -627,14 +939,35 @@ def truncate_markdown(value: str, limit: int) -> str:
 
 
 def write_summary_json(path: Path, result: ScanResult, ranked: list[IpStats]) -> None:
+    injections = [event for event in result.events if event.kind in INJECTION_KINDS]
+    outbound = [event for event in result.events if event.kind in OUTBOUND_ATTACK_KINDS]
+    extortion_events = [event for event in result.events if event.kind in EXTORTION_KINDS]
+    threat_findings = [finding for finding in result.artifacts.findings if finding.category == "threats"]
+    outbound_findings = [finding for finding in threat_findings if finding.kind in OUTBOUND_ATTACK_KINDS]
+    outbound_hits = collect_outbound_ip_hits(outbound, outbound_findings)
+    outbound_summary = summarize_outbound_ip_hits(outbound_hits)
+    target_ips = sorted(
+        ip
+        for ip, data in outbound_summary.items()
+        if isinstance(data["roles"], Counter) and data["roles"].get("target", 0) > 0
+    )
     payload = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "os_type": result.os_type,
         "root": str(result.root),
         "files_scanned": result.files_scanned,
         "unique_ips": len(result.ip_stats),
         "events": len(result.events),
         "scanned_files": result.scanned_files,
         "skipped_files": result.skipped_files,
+        "threats": {
+            "injection_web_attempts": len(injections),
+            "outbound_attack_events": len(outbound),
+            "outbound_target_ips": target_ips,
+            "extortion_events": len(extortion_events),
+            "artifact_findings": len(threat_findings),
+            "by_kind": dict(summarize_threat_events(result.events)),
+        },
         "attackers": [serialize_ip_stats(item) for item in ranked],
         "artifact_findings": [serialize_finding(finding) for finding in result.artifacts.findings],
     }

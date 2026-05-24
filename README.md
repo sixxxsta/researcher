@@ -132,6 +132,50 @@ researcher-scan --root /mnt/vm --out ./report --no-builtin-yara
 
 По умолчанию учитываются все IP, включая private/local/reserved. Это сделано специально: в реальных инцидентах в логах часто видны IP reverse proxy, VPN, NAT, Docker-сетей или внутренних балансировщиков.
 
+## Автоопределение Linux / Windows
+
+Инструмент сам определяет тип смонтированного бэкапа по структуре каталогов и запускает **только один** профиль сканирования:
+
+- **Linux** — если видит `etc/passwd`, `var/log`, `bin`, `usr/bin` и похожие маркеры.
+- **Windows** — если видит `Windows/System32`, `Program Files`, `Users`, `ProgramData`.
+
+После определения:
+
+- Linux-бэкап не запускает Windows-логику и не создаёт Windows-специфичный шум в отчёте.
+- Windows-бэкап не ищет `var/log`, `auth.log`, cron/systemd и Linux-артефакты.
+
+В отчётах это видно сразу:
+
+- `summary.json` → `"os_type": "linux"` или `"windows"`
+- `report.md` → заголовок `Linux Incident Report` или `Windows Incident Report`
+- CLI печатает `Detected OS: linux` или `Detected OS: windows`
+
+### Linux-профиль
+
+- `/var/log`, journal, nginx/apache, SSH/auth, cron/systemd, bash history, `/var/www`, YARA по Linux-путям.
+
+### Windows-профиль
+
+- IIS logs из `inetpub/logs/LogFiles`
+- профили пользователей из `Users`
+- Scheduled Tasks из `Windows/System32/Tasks`
+- PowerShell history
+- `inetpub/wwwroot`
+- YARA по `inetpub`, `Users`, `ProgramData`, `Windows/Temp`
+- опционально `Security.evtx`, если установлен `python-evtx`
+
+Пример Windows mount root:
+
+```text
+/mnt/win/
+  Windows/
+  Program Files/
+  Users/
+  inetpub/
+```
+
+Если ОС определить не удалось, инструмент не будет смешивать оба профиля, а сообщит об ошибке определения layout.
+
 ## Авто-Sudo При Нехватке Прав
 
 Если mountpoint можно читать только под root, инструмент попробует перезапуститься через `sudo`:
@@ -219,7 +263,9 @@ cron
 - IP-адреса из логов;
 - nginx/apache access events;
 - HTTP method, URL, status code, user-agent;
-- подозрительные web-запросы;
+- подозрительные web-запросы и web-инъекции (SQLi, XSS, command injection, path traversal, LFI/RFI, SSTI);
+- признаки использования сервера для атак на других (DDoS/stress tools, scanners, lateral movement);
+- признаки вымогательства и ransom notes;
 - SSH failed login;
 - SSH successful login;
 - пользователей из успешных SSH-входов;
@@ -249,31 +295,64 @@ cron
 - URL/status/user/referrer/user-agent, если применимо;
 - исходная raw-строка.
 
-## Подозрительные Web-Запросы
+## Обнаружение Угроз
 
-Запрос помечается как suspicious, если URL содержит типичные признаки сканирования или эксплуатации:
+Инструмент ищет следы того, что сервер мог использоваться для атак, вымогательства или был целью эксплуатации.
+
+### Web-инъекции и эксплуатация
+
+По URL в nginx/apache/IIS логах классифицируются типы:
 
 ```text
-/.env
-/.git
-wp-login.php
-xmlrpc.php
-phpmyadmin
-adminer
-../
-%2e%2e
-cmd=
-exec=
-shell
-webshell
-/etc/
-passwd
-base64
-union select
-<script
+sql_injection          union select, or 1=1, information_schema, sleep(
+xss_attempt            <script, javascript:, onerror=, alert(
+command_injection      ;cat, |wget, %0acat, $(...)
+path_traversal         ../, %2e%2e%2f, /etc/passwd, c:\windows\
+lfi_rfi_attempt        php://, file://, include=, page=
+ssti_attempt           {{7*7}}, ${7*7}, __class__
+suspicious_web_request /.env, /.git, wp-login.php, webshell, eval(
 ```
 
-Это эвристика. Она не доказывает компрометацию, но помогает быстро поднять наверх шумные и потенциально опасные запросы.
+### Исходящие атаки с сервера
+
+В логах, shell history и текстовых артефактах ищутся инструменты:
+
+```text
+ddos_tool_usage   hping3, slowloris, loic, stresser, syn flood, amplification
+scan_tool_usage   nmap, masscan, sqlmap, hydra, nikto, gobuster, mimikatz
+lateral_movement  sshpass, proxychains, chisel, ngrok, meterpreter, /dev/tcp/
+```
+
+Это помогает понять, использовал ли злоумышленник скомпрометированный сервер как плацдарм для DDoS, сканирования или pivot в другие сети.
+
+**Target IP** — адрес из команды (`nmap 10.0.0.0/8`, `hping3 203.0.113.1`, `/dev/tcp/1.2.3.4/443`): вероятная цель атаки *с* этого сервера.
+
+**Actor IP** — IP сессии из лога (например SSH), в строке которого найден outbound tool: кто запускал команду на сервере.
+
+Сводка: `threats/outbound_ips.txt`, детали: `threats/outbound_ips.csv`, для блокировок: `iocs/outbound_targets.txt`.
+
+### Вымогательство
+
+Ищутся:
+
+- файлы с именами вроде `README_DECRYPT`, `how_to_decrypt`, `restore_files`;
+- строки с bitcoin/xmr адресами, ransom, decrypt, lockbit и т.п. в текстовых файлах и history.
+
+### Отчеты `threats/`
+
+```text
+threats/
+  summary.txt           сводка по всем категориям угроз
+  injections.csv        web-события с инъекциями и эксплуатацией
+  outbound_attacks.txt  DDoS/scanner/lateral movement из логов и артефактов
+  outbound_ips.csv      все IP из исходящих атак (actor/target, с evidence)
+  outbound_ips.txt      сводка: target IPs (жертвы сканов) и actor IPs (сессии)
+  extortion.txt         ransom notes и строки вымогательства
+  threats.csv           все threat findings из файловой системы
+  threats.txt
+```
+
+Это эвристика. Она не доказывает компрометацию или участие в преступлении, но помогает быстро собрать IOC и гипотезы для ручной проверки.
 
 ## Отчеты
 
@@ -295,6 +374,7 @@ report/
     successful_logins_after_bruteforce.txt
   iocs/
     ips.txt
+    outbound_targets.txt
     urls.txt
     domains.txt
     user_agents.txt
@@ -328,6 +408,15 @@ report/
     yara.txt
   network/
     network_artifacts.txt
+  threats/
+    summary.txt
+    injections.csv
+    outbound_attacks.txt
+    outbound_ips.csv
+    outbound_ips.txt
+    extortion.txt
+    threats.csv
+    threats.txt
   events/
     web.csv
     auth.csv
@@ -350,7 +439,9 @@ report/
 - risk level и risk score;
 - successful login after brute force;
 - important artifact findings;
-- suspicious web requests;
+- injection and exploit web attempts;
+- outbound attack indicators (DDoS/scanners/lateral movement);
+- extortion and ransom indicators;
 - ссылки на детальные файлы отчета;
 - suggested manual checks.
 
@@ -363,7 +454,7 @@ report/
 - общее число событий и IP;
 - количество high/medium artifact findings;
 - число successful login событий;
-- число suspicious web requests;
+- injection/exploit web attempts, outbound attack events, extortion indicators;
 - brute-force-then-success кандидаты;
 - топ-10 подозрительных IP;
 - самые важные artifact findings.
@@ -470,6 +561,7 @@ raw
 Чистые списки индикаторов:
 
 - `ips.txt`;
+- `outbound_targets.txt` — IP, извлечённые из команд исходящих атак (nmap, hping и т.д.);
 - `urls.txt`;
 - `domains.txt`;
 - `user_agents.txt`;

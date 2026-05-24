@@ -16,6 +16,7 @@ from typing import BinaryIO, Iterable, Iterator
 import zstandard
 
 from .artifacts import ArtifactScan, scan_artifacts
+from .threats import INJECTION_KINDS, classify_command_threat, classify_url_threat
 
 
 IP_RE = re.compile(
@@ -48,29 +49,6 @@ LOG_NAME_RE = re.compile(
 )
 ROTATED_LOG_RE = re.compile(r"\.log(?:\.\d+)?(?:\.(?:gz|bz2|xz|zst))?$", re.IGNORECASE)
 SKIP_LOG_SUFFIXES = {".journal", ".idx", ".db", ".sqlite", ".sock"}
-
-SUSPICIOUS_PATH_PARTS = (
-    "../",
-    "%2e%2e",
-    "/.env",
-    "/.git",
-    "wp-login.php",
-    "xmlrpc.php",
-    "phpmyadmin",
-    "adminer",
-    "shell",
-    "webshell",
-    "cmd=",
-    "exec=",
-    "passwd",
-    "/etc/",
-    "base64",
-    "eval(",
-    "union+select",
-    "union%20select",
-    "<script",
-    "%3cscript",
-)
 
 
 @dataclass(frozen=True)
@@ -128,6 +106,7 @@ class IpStats:
 @dataclass
 class ScanResult:
     root: Path
+    os_type: str
     files_scanned: int
     scanned_files: list[str]
     skipped_files: list[str]
@@ -137,6 +116,31 @@ class ScanResult:
 
 
 def scan_backup(options: ScanOptions) -> ScanResult:
+    from .detect import detect_backup_os
+
+    root = options.root.resolve()
+    os_type = detect_backup_os(root)
+
+    if os_type == "windows":
+        from .windows_scanner import scan_windows_backup
+
+        return scan_windows_backup(options)
+    if os_type == "linux":
+        return scan_linux_backup(options)
+
+    return ScanResult(
+        root=root,
+        os_type="unknown",
+        files_scanned=0,
+        scanned_files=[],
+        skipped_files=["Could not detect Linux or Windows backup layout under --root"],
+        events=[],
+        ip_stats={},
+        artifacts=ArtifactScan(),
+    )
+
+
+def scan_linux_backup(options: ScanOptions) -> ScanResult:
     root = options.root.resolve()
     events: list[Event] = []
     scanned_files: list[str] = []
@@ -159,6 +163,7 @@ def scan_backup(options: ScanOptions) -> ScanResult:
 
     return ScanResult(
         root=root,
+        os_type="linux",
         files_scanned=len(scanned_files),
         scanned_files=scanned_files,
         skipped_files=skipped_files,
@@ -367,6 +372,22 @@ def parse_line(
             )
         return
 
+    command_threat = classify_command_threat(line)
+    if command_threat:
+        ips = list(extract_ips(line, options.include_private))
+        if ips:
+            for ip in ips:
+                yield Event(
+                    ip=ip,
+                    kind=command_threat,
+                    source=source,
+                    line_number=line_number,
+                    timestamp=extract_syslog_timestamp(line),
+                    category="threats",
+                    raw=line,
+                )
+            return
+
     for ip in extract_ips(line, options.include_private):
         yield Event(
             ip=ip,
@@ -402,7 +423,8 @@ def parse_web_line(
         method = request_parts[0]
         url = request_parts[1]
 
-    kind = "suspicious_web_request" if is_suspicious_url(url) else "web_request"
+    threat_kind = classify_url_threat(url)
+    kind = threat_kind or "web_request"
     return Event(
         ip=ip,
         kind=kind,
@@ -461,8 +483,7 @@ def extract_syslog_timestamp(line: str) -> str:
 
 
 def is_suspicious_url(url: str) -> bool:
-    lowered = url.lower()
-    return any(part in lowered for part in SUSPICIOUS_PATH_PARTS)
+    return classify_url_threat(url) is not None
 
 
 def build_ip_stats(events: Iterable[Event]) -> dict[str, IpStats]:
@@ -475,7 +496,7 @@ def build_ip_stats(events: Iterable[Event]) -> dict[str, IpStats]:
 
         if event.kind == "web_request":
             item.web_requests += 1
-        elif event.kind == "suspicious_web_request":
+        elif event.kind in INJECTION_KINDS:
             item.web_requests += 1
             item.suspicious_web_requests += 1
         elif event.kind == "failed_login":
